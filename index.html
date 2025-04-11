@@ -59,7 +59,7 @@
             border: 1px solid #999;
         }
         .overlap-pattern {
-            background-image: repeating-linear-gradient(45deg, purple, purple 10px, rgba(128, 0, 128, 0.5) 10px, rgba(128, 0, 128, 0.5) 20px);
+            background-color: purple;
         }
         #status {
             position: absolute;
@@ -121,7 +121,7 @@
     
     <div class="overlap-info">
         <h3>Overlap Analysis</h3>
-        <p>The purple hatched areas show where ISRAs and WDPAs overlap.</p>
+        <p>The purple areas show where ISRAs and WDPAs overlap.</p>
         <p>Red circles highlight overlapping WDPAs.</p>
         <p id="overlap-stats">Calculating overlaps...</p>
     </div>
@@ -129,7 +129,7 @@
     <div class="legend">
         <h3>Legend</h3>
         <div class="legend-item">
-            <div class="legend-color" style="background-color: rgba(0, 128, 0, 0.5);"></div>
+            <div class="legend-color" style="background-color: #8B4513;"></div>
             <span>Areas of Interest (AOI)</span>
         </div>
         <div class="legend-item">
@@ -141,7 +141,7 @@
             <span>Important Shark and Ray Areas (ISRAs)</span>
         </div>
         <div class="legend-item">
-            <div class="legend-color" style="background-color: rgba(0, 0, 255, 0.5);"></div>
+            <div class="legend-color" style="background-color: rgba(0, 128, 0, 0.5);"></div>
             <span>World Database on Protected Areas (WDPA)</span>
         </div>
         <div class="legend-item">
@@ -149,8 +149,8 @@
             <span>WDPA Points</span>
         </div>
         <div class="legend-item">
-            <div class="legend-color overlap-pattern"></div>
-            <span>Overlap Areas</span>
+            <div class="legend-color" style="background-color: purple;"></div>
+            <span>Overlap Areas (ISRAs + WDPA)</span>
         </div>
         <div class="legend-item">
             <div style="width: 24px; height: 24px; margin-right: 8px; border: 2px solid red; border-radius: 50%;"></div>
@@ -243,8 +243,8 @@
                             
                             L.geoJSON(aoiData, {
                                 style: {
-                                    color: '#006400',
-                                    fillColor: '#008000',
+                                    color: '#8B4513',  // Brown color
+                                    fillColor: '#8B4513',
                                     weight: 1,
                                     opacity: 0.5,
                                     fillOpacity: 0.3
@@ -349,8 +349,8 @@
                             
                             L.geoJSON(wdpaData, {
                                 style: {
-                                    color: '#0000ff',
-                                    fillColor: '#0000ff',
+                                    color: '#008000',  // Green color
+                                    fillColor: '#008000',
                                     weight: 1,
                                     opacity: 0.8,
                                     fillOpacity: 0.5
@@ -414,7 +414,7 @@
                     // Sets to track overlapping WDPAs
                     const overlappingWdpaIds = new Set();
                     
-                    // Calculate overlaps if we have both ISRAs and WDPAs
+                    // Calculate overlaps between ISRAs and WDPAs only
                     if (israData && wdpaData) {
                         updateStatus("Calculating overlaps between ISRAs and WDPAs...");
                         
@@ -431,15 +431,14 @@
                             }
                         });
                         
-                        // Display overlap areas with hatched pattern
+                        // Display overlap areas
                         L.geoJSON(isra_wdpa_overlaps, {
                             style: {
-                                color: '#800080',
-                                fillColor: '#800080',
+                                color: 'purple',
+                                fillColor: 'purple',
                                 weight: 2,
                                 opacity: 0.9,
-                                fillOpacity: 0.7,
-                                dashArray: '5, 5'
+                                fillOpacity: 0.7
                             },
                             onEachFeature: function(feature, layer) {
                                 let html = '<div><strong>Overlap Area (ISRA + WDPA)</strong><br/>';
@@ -460,122 +459,60 @@
                         }).addTo(overlapLayer);
                         
                         updateStatus("ISRA-WDPA overlap calculation complete!");
+                        
+                        // Add red circles around overlapping WDPAs
+                        updateStatus(`Adding red circles around ${overlappingWdpaIds.size} overlapping WDPAs...`);
+                        
+                        // Process each WDPA feature to highlight those that overlap with ISRAs
+                        wdpaFeatures.forEach(feature => {
+                            const featureId = feature.properties?.id || feature.id;
+                            
+                            // If this WDPA overlaps with ISRAs
+                            if (overlappingWdpaIds.has(featureId)) {
+                                try {
+                                    // Get the center of the WDPA polygon
+                                    const center = turf.center(feature);
+                                    const centerCoords = center.geometry.coordinates;
+                                    
+                                    // Calculate approximate radius based on feature size
+                                    let radius = 10000; // Default 10km
+                                    
+                                    try {
+                                        // Try to calculate a better radius based on the area
+                                        const area = turf.area(feature);
+                                        radius = Math.sqrt(area / Math.PI); // r = sqrt(A/π)
+                                        
+                                        // Add some buffer, but keep it reasonable
+                                        radius = Math.max(5000, Math.min(radius * 1.2, 50000));
+                                    } catch (e) {
+                                        console.error("Error calculating radius:", e);
+                                    }
+                                    
+                                    // Create a red circle
+                                    const circle = L.circle([centerCoords[1], centerCoords[0]], {
+                                        color: 'red',
+                                        fillColor: 'transparent',
+                                        fillOpacity: 0,
+                                        weight: 3,
+                                        radius: radius
+                                    });
+                                    
+                                    // Add popup with information
+                                    const name = feature.properties?.NAME || feature.properties?.name || "Unnamed Protected Area";
+                                    circle.bindPopup(`<strong>Overlapping WDPA:</strong> ${name}`);
+                                    
+                                    // Add to the highlight layer
+                                    circle.addTo(highlightLayer);
+                                } catch (e) {
+                                    console.error("Error highlighting WDPA:", e);
+                                }
+                            }
+                        });
+                        
+                        updateStatus(`Added red circles to ${overlappingWdpaIds.size} overlapping WDPAs`);
                     } else {
                         updateStatus("Cannot calculate overlaps: Missing either ISRAs or WDPA data", true);
                     }
-                    
-                    // Calculate additional overlaps if we have CISRA data
-                    if (cisraData && wdpaData) {
-                        updateStatus("Calculating overlaps between CISRA and WDPA...");
-                        
-                        // Calculate and display overlaps
-                        const cisra_wdpa_overlaps = calculateOverlaps(cisraData, wdpaData);
-                        
-                        // Track WDPAs that overlap with CISRAs
-                        cisra_wdpa_overlaps.features.forEach(feature => {
-                            if (feature.properties && feature.properties.wdpa_id) {
-                                overlappingWdpaIds.add(feature.properties.wdpa_id);
-                            }
-                        });
-                        
-                        // Display CISRA-WDPA overlap areas
-                        L.geoJSON(cisra_wdpa_overlaps, {
-                            style: {
-                                color: '#9400D3',  // Dark violet
-                                fillColor: '#9400D3',
-                                weight: 2,
-                                opacity: 0.9,
-                                fillOpacity: 0.6,
-                                dashArray: '5, 5'
-                            },
-                            onEachFeature: function(feature, layer) {
-                                let html = '<div><strong>Overlap Area (CISRA + WDPA)</strong><br/>';
-                                if (feature.properties) {
-                                    if (feature.properties.isra_name) {
-                                        html += `<strong>CISRA:</strong> ${feature.properties.isra_name}<br/>`;
-                                    }
-                                    if (feature.properties.wdpa_name) {
-                                        html += `<strong>Protected Area:</strong> ${feature.properties.wdpa_name}<br/>`;
-                                    }
-                                    if (feature.properties.overlap_area) {
-                                        html += `<strong>Area:</strong> ${Math.round(feature.properties.overlap_area)} sq km`;
-                                    }
-                                }
-                                html += '</div>';
-                                layer.bindPopup(html);
-                            }
-                        }).addTo(overlapLayer);
-                        
-                        updateStatus("CISRA-WDPA overlap calculation complete!");
-                    }
-                    
-                    // Calculate AOI and WDPA overlaps
-                    if (aoiData && wdpaData) {
-                        updateStatus("Calculating overlaps between AOI and WDPA...");
-                        
-                        // Calculate overlaps
-                        const aoi_wdpa_overlaps = calculateOverlaps(aoiData, wdpaData);
-                        
-                        // Track WDPAs that overlap with AOIs
-                        aoi_wdpa_overlaps.features.forEach(feature => {
-                            if (feature.properties && feature.properties.wdpa_id) {
-                                overlappingWdpaIds.add(feature.properties.wdpa_id);
-                            }
-                        });
-                        
-                        updateStatus("AOI-WDPA overlap calculation complete!");
-                    }
-                    
-                    // Add red circles around overlapping WDPAs
-                    updateStatus(`Adding red circles around ${overlappingWdpaIds.size} overlapping WDPAs...`);
-                    
-                    // Process each WDPA feature to highlight those that overlap
-                    wdpaFeatures.forEach(feature => {
-                        const featureId = feature.properties?.id || feature.id;
-                        
-                        // If this WDPA overlaps with any of our layers of interest
-                        if (overlappingWdpaIds.has(featureId)) {
-                            try {
-                                // Get the center of the WDPA polygon
-                                const center = turf.center(feature);
-                                const centerCoords = center.geometry.coordinates;
-                                
-                                // Calculate approximate radius based on feature size
-                                let radius = 10000; // Default 10km
-                                
-                                try {
-                                    // Try to calculate a better radius based on the area
-                                    const area = turf.area(feature);
-                                    radius = Math.sqrt(area / Math.PI); // r = sqrt(A/π)
-                                    
-                                    // Add some buffer, but keep it reasonable
-                                    radius = Math.max(5000, Math.min(radius * 1.2, 50000));
-                                } catch (e) {
-                                    console.error("Error calculating radius:", e);
-                                }
-                                
-                                // Create a red circle
-                                const circle = L.circle([centerCoords[1], centerCoords[0]], {
-                                    color: 'red',
-                                    fillColor: 'transparent',
-                                    fillOpacity: 0,
-                                    weight: 3,
-                                    radius: radius
-                                });
-                                
-                                // Add popup with information
-                                const name = feature.properties?.NAME || feature.properties?.name || "Unnamed Protected Area";
-                                circle.bindPopup(`<strong>Overlapping WDPA:</strong> ${name}`);
-                                
-                                // Add to the highlight layer
-                                circle.addTo(highlightLayer);
-                            } catch (e) {
-                                console.error("Error highlighting WDPA:", e);
-                            }
-                        }
-                    });
-                    
-                    updateStatus(`Added red circles to ${overlappingWdpaIds.size} overlapping WDPAs`);
                     
                     // Add layer controls with better organization
                     const baseMaps = {
@@ -591,7 +528,7 @@
                         "ISRAs": israLayer,
                         "WDPA (Protected Areas)": wdpaLayer,
                         "WDPA Points": wdpaPointsLayer,
-                        "Overlap Areas": overlapLayer,
+                        "Overlap Areas (ISRAs + WDPA)": overlapLayer,
                         "Overlapping WDPAs (Red Circles)": highlightLayer
                     };
                     
