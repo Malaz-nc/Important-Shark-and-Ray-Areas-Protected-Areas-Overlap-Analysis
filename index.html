@@ -103,6 +103,26 @@
             cursor: pointer;
             font-weight: bold;
         }
+        #filter-control {
+            position: absolute;
+            bottom: 30px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 999;
+            background: white;
+            padding: 10px;
+            border-radius: 4px;
+            box-shadow: 0 0 10px rgba(0,0,0,0.2);
+            text-align: center;
+        }
+        .country-label {
+            background: rgba(255, 255, 255, 0.7);
+            border: none;
+            border-radius: 4px;
+            padding: 2px 4px;
+            font-weight: bold;
+            box-shadow: 0 0 3px rgba(0,0,0,0.2);
+        }
     </style>
 </head>
 <body>
@@ -126,8 +146,21 @@
         <p id="overlap-stats">Calculating overlaps...</p>
     </div>
     
+    <div id="filter-control">
+        <h3>Filter Overlapping Areas</h3>
+        <label for="min-area">Minimum Area (sq km): </label>
+        <input type="range" id="min-area" min="0" max="500" value="0" step="10">
+        <span id="area-value">0</span> sq km
+        <button id="apply-filter">Apply Filter</button>
+        <button id="reset-filter">Reset</button>
+    </div>
+    
     <div class="legend">
         <h3>Legend</h3>
+        <div class="legend-item">
+            <div class="legend-color" style="background-color: rgba(169, 169, 169, 0.3); border: 2px solid #333;"></div>
+            <span>African Countries</span>
+        </div>
         <div class="legend-item">
             <div class="legend-color" style="background-color: #8B4513;"></div>
             <span>Areas of Interest (AOI)</span>
@@ -137,15 +170,23 @@
             <span>CISRA - Region 3</span>
         </div>
         <div class="legend-item">
-            <div class="legend-color" style="background-color: rgba(255, 0, 0, 0.5);"></div>
-            <span>Important Shark and Ray Areas (ISRAs)</span>
+            <div class="legend-color" style="background-color: #FF5733;"></div>
+            <span>ISRAs - Morocco</span>
+        </div>
+        <div class="legend-item">
+            <div class="legend-color" style="background-color: #FFC300;"></div>
+            <span>ISRAs - Tunisia</span>
+        </div>
+        <div class="legend-item">
+            <div class="legend-color" style="background-color: #C70039;"></div>
+            <span>ISRAs - Libya</span>
         </div>
         <div class="legend-item">
             <div class="legend-color" style="background-color: rgba(0, 128, 0, 0.5);"></div>
             <span>World Database on Protected Areas (WDPA)</span>
         </div>
         <div class="legend-item">
-            <div class="legend-color" style="background-color: rgba(255, 255, 0, 0.5);"></div>
+            <div style="width: 10px; height: 10px; margin-right: 8px; background-color: black; border-radius: 50%;"></div>
             <span>WDPA Points</span>
         </div>
         <div class="legend-item">
@@ -164,6 +205,30 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/Turf.js/6.5.0/turf.min.js"></script>
     
     <script>
+        // Helper function to extract name from properties
+        function getFeatureName(properties) {
+            // Try all possible variations of name properties
+            return properties?.Site_Name || 
+                   properties?.site_name || 
+                   properties?.SITE_NAME || 
+                   properties?.Name || 
+                   properties?.NAME || 
+                   properties?.name ||
+                   properties?.title ||
+                   properties?.TITLE ||
+                   properties?.Title ||
+                   properties?.ISRA_NAME ||
+                   properties?.isra_name ||
+                   properties?.SITE ||
+                   properties?.site ||
+                   properties?.ISRA ||
+                   properties?.isra ||
+                   properties?.label ||
+                   properties?.LABEL ||
+                   properties?.Label ||
+                   "Unnamed Area";
+        }
+        
         // Status display function
         function updateStatus(message, isError = false) {
             const statusDiv = document.getElementById('loading-status');
@@ -215,18 +280,94 @@
             });
             
             // Create layer groups
+            const countriesLayer = L.layerGroup().addTo(map);
             const aoiLayer = L.layerGroup().addTo(map);
             const cisraLayer = L.layerGroup().addTo(map);
-            const israLayer = L.layerGroup().addTo(map);
+            const israelMoroccoLayer = L.layerGroup().addTo(map);
+            const israelTunisiaLayer = L.layerGroup().addTo(map);
+            const israelLibyaLayer = L.layerGroup().addTo(map);
             const wdpaLayer = L.layerGroup().addTo(map);
             const wdpaPointsLayer = L.layerGroup().addTo(map);
             const overlapLayer = L.layerGroup().addTo(map);
             const highlightLayer = L.layerGroup().addTo(map); // New layer for red circles
             
+            // Variables to store original overlap features and filtered features
+            let originalOverlapFeatures = null;
+            let filteredGeoJSONLayer = null;
+            
             // Function to load GeoJSON data
             async function loadData() {
                 try {
                     updateStatus("Starting to load data...");
+                    
+                    // Load African Countries
+                    updateStatus("Loading African Countries...");
+                    try {
+                        const countriesResponse = await fetch('data/AFRICA COUNTRIES.geojson');
+                        if (!countriesResponse.ok) {
+                            throw new Error(`HTTP error! status: ${countriesResponse.status}`);
+                        }
+                        const text = await countriesResponse.text();
+                        try {
+                            const countriesData = JSON.parse(text);
+                            updateStatus("African Countries loaded successfully");
+                            
+                            // Log the first feature's properties to see what's available
+                            if (countriesData.features && countriesData.features.length > 0) {
+                                console.log("African Countries properties:", countriesData.features[0].properties);
+                            }
+                            
+                            // Create country boundaries with labels
+                            L.geoJSON(countriesData, {
+                                style: {
+                                    color: '#333',  // Darker border
+                                    fillColor: '#A9A9A9',
+                                    weight: 2.5,    // Thicker border
+                                    opacity: 0.8,
+                                    fillOpacity: 0.2
+                                },
+                                onEachFeature: function(feature, layer) {
+                                    // Try different property names for country name
+                                    const name = feature.properties?.CNTRY_NAME || 
+                                                 feature.properties?.NAME || 
+                                                 feature.properties?.name || 
+                                                 feature.properties?.Country ||
+                                                 feature.properties?.COUNTRY ||
+                                                 feature.properties?.country ||
+                                                 "Unnamed Country";
+                                    
+                                    // Add popup
+                                    layer.bindPopup(`<strong>Country:</strong> ${name}`);
+                                    
+                                    // Add a label at the center of the country
+                                    if (name !== "Unnamed Country") {
+                                        try {
+                                            // Get center of the feature
+                                            const center = turf.center(feature);
+                                            const centerCoords = center.geometry.coordinates;
+                                            
+                                            // Create a marker with a country label
+                                            L.marker([centerCoords[1], centerCoords[0]], {
+                                                icon: L.divIcon({
+                                                    className: 'country-label',
+                                                    html: name,
+                                                    iconSize: [100, 20],
+                                                    iconAnchor: [50, 10]
+                                                })
+                                            }).addTo(countriesLayer);
+                                        } catch (e) {
+                                            console.error("Error adding country label:", e);
+                                        }
+                                    }
+                                }
+                            }).addTo(countriesLayer);
+                        } catch (e) {
+                            updateStatus(`Error parsing African Countries as JSON: ${e.message}`, true);
+                            console.error(`First 100 chars of response: ${text.substring(0, 100)}`);
+                        }
+                    } catch (error) {
+                        updateStatus(`Error loading African Countries: ${error.message}`, true);
+                    }
                     
                     // Load AOI Regions
                     updateStatus("Loading AOI Regions...");
@@ -241,6 +382,11 @@
                             aoiData = JSON.parse(text);
                             updateStatus("AOI Regions loaded successfully");
                             
+                            // Log the first feature's properties
+                            if (aoiData.features && aoiData.features.length > 0) {
+                                console.log("AOI properties:", aoiData.features[0].properties);
+                            }
+                            
                             L.geoJSON(aoiData, {
                                 style: {
                                     color: '#8B4513',  // Brown color
@@ -250,7 +396,7 @@
                                     fillOpacity: 0.3
                                 },
                                 onEachFeature: function(feature, layer) {
-                                    const name = feature.properties?.NAME || feature.properties?.name || "Unnamed AOI";
+                                    const name = getFeatureName(feature.properties);
                                     layer.bindPopup(`<strong>AOI Region:</strong> ${name}`);
                                 }
                             }).addTo(aoiLayer);
@@ -275,6 +421,11 @@
                             cisraData = JSON.parse(text);
                             updateStatus("CISRA Region 3 loaded successfully");
                             
+                            // Log properties
+                            if (cisraData.features && cisraData.features.length > 0) {
+                                console.log("CISRA properties:", cisraData.features[0].properties);
+                            }
+                            
                             L.geoJSON(cisraData, {
                                 style: {
                                     color: '#ADD8E6',
@@ -284,7 +435,7 @@
                                     fillOpacity: 0.5
                                 },
                                 onEachFeature: function(feature, layer) {
-                                    const name = feature.properties?.NAME || feature.properties?.name || "Unnamed CISRA";
+                                    const name = getFeatureName(feature.properties);
                                     layer.bindPopup(`<strong>CISRA Region 3:</strong> ${name}`);
                                 }
                             }).addTo(cisraLayer);
@@ -296,38 +447,121 @@
                         updateStatus(`Error loading CISRA Region 3: ${error.message}`, true);
                     }
                     
-                    // Load ISRAs
-                    updateStatus("Loading ISRAs...");
-                    let israData = null;
+                    // Load ISRAs - Morocco
+                    updateStatus("Loading ISRAs - Morocco...");
+                    let israMoroccoData = null;
                     try {
-                        const israResponse = await fetch('data/ISRA.geojson');
-                        if (!israResponse.ok) {
-                            throw new Error(`HTTP error! status: ${israResponse.status}`);
+                        const moroccoResponse = await fetch('data/isra_region03_morocco.geojson');
+                        if (!moroccoResponse.ok) {
+                            throw new Error(`HTTP error! status: ${moroccoResponse.status}`);
                         }
-                        const text = await israResponse.text();
+                        const text = await moroccoResponse.text();
                         try {
-                            israData = JSON.parse(text);
-                            updateStatus("ISRAs loaded successfully");
+                            israMoroccoData = JSON.parse(text);
+                            updateStatus("ISRAs Morocco loaded successfully");
                             
-                            L.geoJSON(israData, {
+                            // Log properties to help debug
+                            if (israMoroccoData.features && israMoroccoData.features.length > 0) {
+                                console.log("Morocco ISRA properties:", israMoroccoData.features[0].properties);
+                            }
+                            
+                            L.geoJSON(israMoroccoData, {
                                 style: {
-                                    color: '#ff0000',
-                                    fillColor: '#ff0000',
+                                    color: '#FF5733',  // Orange-red
+                                    fillColor: '#FF5733',
                                     weight: 1,
                                     opacity: 0.8,
                                     fillOpacity: 0.5
                                 },
                                 onEachFeature: function(feature, layer) {
-                                    const name = feature.properties?.NAME || feature.properties?.name || "Unnamed ISRA";
-                                    layer.bindPopup(`<strong>ISRA:</strong> ${name}`);
+                                    const name = getFeatureName(feature.properties);
+                                    layer.bindPopup(`<strong>ISRA Morocco:</strong> ${name}`);
                                 }
-                            }).addTo(israLayer);
+                            }).addTo(israelMoroccoLayer);
                         } catch (e) {
-                            updateStatus(`Error parsing ISRAs as JSON: ${e.message}`, true);
+                            updateStatus(`Error parsing ISRAs Morocco as JSON: ${e.message}`, true);
                             console.error(`First 100 chars of response: ${text.substring(0, 100)}`);
                         }
                     } catch (error) {
-                        updateStatus(`Error loading ISRAs: ${error.message}`, true);
+                        updateStatus(`Error loading ISRAs Morocco: ${error.message}`, true);
+                    }
+                    
+                    // Load ISRAs - Tunisia
+                    updateStatus("Loading ISRAs - Tunisia...");
+                    let israTunisiaData = null;
+                    try {
+                        const tunisiaResponse = await fetch('data/isra_region03_tunisia.geojson');
+                        if (!tunisiaResponse.ok) {
+                            throw new Error(`HTTP error! status: ${tunisiaResponse.status}`);
+                        }
+                        const text = await tunisiaResponse.text();
+                        try {
+                            israTunisiaData = JSON.parse(text);
+                            updateStatus("ISRAs Tunisia loaded successfully");
+                            
+                            // Log properties
+                            if (israTunisiaData.features && israTunisiaData.features.length > 0) {
+                                console.log("Tunisia ISRA properties:", israTunisiaData.features[0].properties);
+                            }
+                            
+                            L.geoJSON(israTunisiaData, {
+                                style: {
+                                    color: '#FFC300',  // Gold
+                                    fillColor: '#FFC300',
+                                    weight: 1,
+                                    opacity: 0.8,
+                                    fillOpacity: 0.5
+                                },
+                                onEachFeature: function(feature, layer) {
+                                    const name = getFeatureName(feature.properties);
+                                    layer.bindPopup(`<strong>ISRA Tunisia:</strong> ${name}`);
+                                }
+                            }).addTo(israelTunisiaLayer);
+                        } catch (e) {
+                            updateStatus(`Error parsing ISRAs Tunisia as JSON: ${e.message}`, true);
+                            console.error(`First 100 chars of response: ${text.substring(0, 100)}`);
+                        }
+                    } catch (error) {
+                        updateStatus(`Error loading ISRAs Tunisia: ${error.message}`, true);
+                    }
+                    
+                    // Load ISRAs - Libya
+                    updateStatus("Loading ISRAs - Libya...");
+                    let israLibyaData = null;
+                    try {
+                        const libyaResponse = await fetch('data/isra_region03_libya.geojson');
+                        if (!libyaResponse.ok) {
+                            throw new Error(`HTTP error! status: ${libyaResponse.status}`);
+                        }
+                        const text = await libyaResponse.text();
+                        try {
+                            israLibyaData = JSON.parse(text);
+                            updateStatus("ISRAs Libya loaded successfully");
+                            
+                            // Log properties
+                            if (israLibyaData.features && israLibyaData.features.length > 0) {
+                                console.log("Libya ISRA properties:", israLibyaData.features[0].properties);
+                            }
+                            
+                            L.geoJSON(israLibyaData, {
+                                style: {
+                                    color: '#C70039',  // Dark red
+                                    fillColor: '#C70039',
+                                    weight: 1,
+                                    opacity: 0.8,
+                                    fillOpacity: 0.5
+                                },
+                                onEachFeature: function(feature, layer) {
+                                    const name = getFeatureName(feature.properties);
+                                    layer.bindPopup(`<strong>ISRA Libya:</strong> ${name}`);
+                                }
+                            }).addTo(israelLibyaLayer);
+                        } catch (e) {
+                            updateStatus(`Error parsing ISRAs Libya as JSON: ${e.message}`, true);
+                            console.error(`First 100 chars of response: ${text.substring(0, 100)}`);
+                        }
+                    } catch (error) {
+                        updateStatus(`Error loading ISRAs Libya: ${error.message}`, true);
                     }
                     
                     // Load WDPA (World Database on Protected Areas)
@@ -344,6 +578,11 @@
                             wdpaData = JSON.parse(text);
                             updateStatus("WDPA loaded successfully");
                             
+                            // Log properties
+                            if (wdpaData.features && wdpaData.features.length > 0) {
+                                console.log("WDPA properties:", wdpaData.features[0].properties);
+                            }
+                            
                             // Store all WDPA features
                             wdpaFeatures = wdpaData.features;
                             
@@ -356,7 +595,7 @@
                                     fillOpacity: 0.5
                                 },
                                 onEachFeature: function(feature, layer) {
-                                    const name = feature.properties?.NAME || feature.properties?.name || "Unnamed Protected Area";
+                                    const name = getFeatureName(feature.properties);
                                     layer.bindPopup(`<strong>Protected Area:</strong> ${name}`);
                                     
                                     // Store feature ID in layer for later reference
@@ -375,7 +614,7 @@
                         updateStatus(`Error loading WDPA: ${error.message}`, true);
                     }
                     
-                    // Load WDPA Points
+                    // Load WDPA Points - Using simple black circles
                     updateStatus("Loading WDPA Points...");
                     try {
                         const wdpaPointsResponse = await fetch('data/WDPA_points.geojson');
@@ -387,19 +626,25 @@
                             const wdpaPointsData = JSON.parse(text);
                             updateStatus("WDPA Points loaded successfully");
                             
+                            // Log properties
+                            if (wdpaPointsData.features && wdpaPointsData.features.length > 0) {
+                                console.log("WDPA Points properties:", wdpaPointsData.features[0].properties);
+                            }
+                            
                             L.geoJSON(wdpaPointsData, {
                                 pointToLayer: function(feature, latlng) {
+                                    // Use a small black circle for WDPA points
                                     return L.circleMarker(latlng, {
-                                        radius: 6,
-                                        fillColor: "#ffff00",
-                                        color: "#000",
+                                        radius: 4,  // Smaller radius
+                                        fillColor: "black",
+                                        color: "black",
                                         weight: 1,
                                         opacity: 1,
-                                        fillOpacity: 0.8
+                                        fillOpacity: 1
                                     });
                                 },
                                 onEachFeature: function(feature, layer) {
-                                    const name = feature.properties?.NAME || feature.properties?.name || "Unnamed Point";
+                                    const name = getFeatureName(feature.properties);
                                     layer.bindPopup(`<strong>WDPA Point:</strong> ${name}`);
                                 }
                             }).addTo(wdpaPointsLayer);
@@ -414,12 +659,25 @@
                     // Sets to track overlapping WDPAs
                     const overlappingWdpaIds = new Set();
                     
-                    // Calculate overlaps between ISRAs and WDPAs only
-                    if (israData && wdpaData) {
+                    // Combine all ISRA data for overlaps
+                    const allIsras = {
+                        type: "FeatureCollection",
+                        features: [
+                            ...(israMoroccoData?.features || []),
+                            ...(israTunisiaData?.features || []),
+                            ...(israLibyaData?.features || [])
+                        ]
+                    };
+                    
+                    // Calculate overlaps between all ISRAs and WDPAs
+                    if (allIsras.features.length > 0 && wdpaData) {
                         updateStatus("Calculating overlaps between ISRAs and WDPAs...");
                         
                         // Calculate and display overlaps
-                        const isra_wdpa_overlaps = calculateOverlaps(israData, wdpaData);
+                        const isra_wdpa_overlaps = calculateOverlaps(allIsras, wdpaData);
+                        
+                        // Store original overlaps for filtering
+                        originalOverlapFeatures = isra_wdpa_overlaps;
                         
                         // Update overlap stats
                         updateOverlapStats(isra_wdpa_overlaps);
@@ -432,183 +690,286 @@
                         });
                         
                         // Display overlap areas
-                        L.geoJSON(isra_wdpa_overlaps, {
-                            style: {
-                                color: 'purple',
-                                fillColor: 'purple',
-                                weight: 2,
-                                opacity: 0.9,
-                                fillOpacity: 0.7
-                            },
-                            onEachFeature: function(feature, layer) {
-                                let html = '<div><strong>Overlap Area (ISRA + WDPA)</strong><br/>';
-                                if (feature.properties) {
-                                    if (feature.properties.isra_name) {
-                                        html += `<strong>ISRA:</strong> ${feature.properties.isra_name}<br/>`;
-                                    }
-                                    if (feature.properties.wdpa_name) {
-                                        html += `<strong>Protected Area:</strong> ${feature.properties.wdpa_name}<br/>`;
-                                    }
-                                    if (feature.properties.overlap_area) {
-                                        html += `<strong>Area:</strong> ${Math.round(feature.properties.overlap_area)} sq km`;
-                                    }
-                                }
-                                html += '</div>';
-                                layer.bindPopup(html);
-                            }
-                        }).addTo(overlapLayer);
-                        
-                        updateStatus("ISRA-WDPA overlap calculation complete!");
-                        
-                        // Add red circles around overlapping WDPAs
-                        updateStatus(`Adding red circles around ${overlappingWdpaIds.size} overlapping WDPAs...`);
-                        
-                        // Process each WDPA feature to highlight those that overlap with ISRAs
-                        wdpaFeatures.forEach(feature => {
-                            const featureId = feature.properties?.id || feature.id;
-                            
-                            // If this WDPA overlaps with ISRAs
-                            if (overlappingWdpaIds.has(featureId)) {
-                                try {
-                                    // Get the center of the WDPA polygon
-                                    const center = turf.center(feature);
-                                    const centerCoords = center.geometry.coordinates;
-                                    
-                                    // Calculate approximate radius based on feature size
-                                    let radius = 10000; // Default 10km
-                                    
-                                    try {
-                                        // Try to calculate a better radius based on the area
-                                        const area = turf.area(feature);
-                                        radius = Math.sqrt(area / Math.PI); // r = sqrt(A/π)
-                                        
-                                        // Add some buffer, but keep it reasonable
-                                        radius = Math.max(5000, Math.min(radius * 1.2, 50000));
-                                    } catch (e) {
-                                        console.error("Error calculating radius:", e);
-                                    }
-                                    
-                                    // Create a red circle
-                                    const circle = L.circle([centerCoords[1], centerCoords[0]], {
-                                        color: 'red',
-                                        fillColor: 'transparent',
-                                        fillOpacity: 0,
-                                        weight: 3,
-                                        radius: radius
-                                    });
-                                    
-                                    // Add popup with information
-                                    const name = feature.properties?.NAME || feature.properties?.name || "Unnamed Protected Area";
-                                    circle.bindPopup(`<strong>Overlapping WDPA:</strong> ${name}`);
-                                    
-                                    // Add to the highlight layer
-                                    circle.addTo(highlightLayer);
-                                } catch (e) {
-                                    console.error("Error highlighting WDPA:", e);
-                                }
-                            }
-                        });
-                        
-                        updateStatus(`Added red circles to ${overlappingWdpaIds.size} overlapping WDPAs`);
-                    } else {
-                        updateStatus("Cannot calculate overlaps: Missing either ISRAs or WDPA data", true);
-                    }
-                    
-                    // Add layer controls with better organization
-                    const baseMaps = {
-                        "OpenStreetMap": osmLayer,
-                        "Satellite": satelliteLayer,
-                        "Topographic": topoLayer
-                    };
-                    
-                    const overlayMaps = {
-                        // Base layers
-                        "Areas of Interest (AOI)": aoiLayer,
-                        "CISRA - Region 3": cisraLayer,
-                        "ISRAs": israLayer,
-                        "WDPA (Protected Areas)": wdpaLayer,
-                        "WDPA Points": wdpaPointsLayer,
-                        "Overlap Areas (ISRAs + WDPA)": overlapLayer,
-                        "Overlapping WDPAs (Red Circles)": highlightLayer
-                    };
-                    
-                    L.control.layers(baseMaps, overlayMaps, {
-                        collapsed: false,
-                        position: 'topright'
-                    }).addTo(map);
-                    
-                    // Add zoom control to top-left corner
-                    L.control.zoom({
-                        position: 'topleft'
-                    }).addTo(map);
-                    
-                    // Add scale bar
-                    L.control.scale({
-                        imperial: false,
-                        metric: true,
-                        position: 'bottomleft'
-                    }).addTo(map);
-                    
-                    updateStatus("Map setup complete!");
-                    
-                    // Auto-hide status after 8 seconds
-                    setTimeout(() => {
-                        const status = document.getElementById('status');
-                        if (status) {
-                            status.style.display = 'none';
-                        }
-                    }, 8000);
-                    
-                } catch (error) {
-                    updateStatus(`General error loading data: ${error.message}`, true);
-                    console.error("Error loading data:", error);
-                }
-            }
-            
-            // Function to calculate overlaps between two GeoJSON datasets
-            function calculateOverlaps(dataset1, dataset2) {
-                const overlaps = {
-                    type: "FeatureCollection",
-                    features: []
-                };
-                
-                // Loop through each feature in dataset1
-                dataset1.features.forEach(feature1 => {
-                    // Loop through each feature in dataset2
-                    dataset2.features.forEach(feature2 => {
-                        try {
-                            // Calculate intersection using turf.js
-                            const intersection = turf.intersect(feature1, feature2);
-                            
-                            // If there is an overlap
-                            if (intersection) {
-                                // Calculate area in square kilometers
-                                const area = turf.area(intersection) / 1000000; // convert m² to km²
-                                
-                                // Add properties
-                                intersection.properties = {
-                                    isra_id: feature1.properties?.id || "Unknown ID",
-                                    isra_name: feature1.properties?.NAME || feature1.properties?.name || "Unnamed Area",
-                                    wdpa_id: feature2.properties?.id || feature2.id || "Unknown ID",
-                                    wdpa_name: feature2.properties?.NAME || feature2.properties?.name || "Unnamed Area",
-                                    overlap_area: area
-                                };
-                                
-                                // Add to overlaps collection
-                                overlaps.features.push(intersection);
-                            }
-                        } catch (error) {
-                            console.error("Error calculating intersection:", error);
-                        }
-                    });
-                });
-                
-                return overlaps;
-            }
-            
-            // Load data
-            loadData();
-        });
-    </script>
+                        // Display overlap areas
+                       filteredGeoJSONLayer = L.geoJSON(isra_wdpa_overlaps, {
+                           style: {
+                               color: 'purple',
+                               fillColor: 'purple',
+                               weight: 2,
+                               opacity: 0.9,
+                               fillOpacity: 0.7
+                           },
+                           onEachFeature: function(feature, layer) {
+                               let html = '<div><strong>Overlap Area (ISRA + WDPA)</strong><br/>';
+                               if (feature.properties) {
+                                   if (feature.properties.isra_name) {
+                                       html += `<strong>ISRA:</strong> ${feature.properties.isra_name}<br/>`;
+                                   }
+                                   if (feature.properties.wdpa_name) {
+                                       html += `<strong>Protected Area:</strong> ${feature.properties.wdpa_name}<br/>`;
+                                   }
+                                   if (feature.properties.overlap_area) {
+                                       html += `<strong>Area:</strong> ${Math.round(feature.properties.overlap_area)} sq km`;
+                                   }
+                               }
+                               html += '</div>';
+                               layer.bindPopup(html);
+                           }
+                       }).addTo(overlapLayer);
+                       
+                       updateStatus("ISRA-WDPA overlap calculation complete!");
+                       
+                       // Add red circles around overlapping WDPAs
+                       updateStatus(`Adding red circles around ${overlappingWdpaIds.size} overlapping WDPAs...`);
+                       
+                       // Process each WDPA feature to highlight those that overlap with ISRAs
+                       wdpaFeatures.forEach(feature => {
+                           const featureId = feature.properties?.id || feature.id;
+                           
+                           // If this WDPA overlaps with ISRAs
+                           if (overlappingWdpaIds.has(featureId)) {
+                               try {
+                                   // Get the center of the WDPA polygon
+                                   const center = turf.center(feature);
+                                   const centerCoords = center.geometry.coordinates;
+                                   
+                                   // Calculate approximate radius based on feature size
+                                   let radius = 10000; // Default 10km
+                                   
+                                   try {
+                                       // Try to calculate a better radius based on the area
+                                       const area = turf.area(feature);
+                                       radius = Math.sqrt(area / Math.PI); // r = sqrt(A/π)
+                                       
+                                       // Add some buffer, but keep it reasonable
+                                       radius = Math.max(5000, Math.min(radius * 1.2, 50000));
+                                   } catch (e) {
+                                       console.error("Error calculating radius:", e);
+                                   }
+                                   
+                                   // Create a red circle
+                                   const circle = L.circle([centerCoords[1], centerCoords[0]], {
+                                       color: 'red',
+                                       fillColor: 'transparent',
+                                       fillOpacity: 0,
+                                       weight: 3,
+                                       radius: radius
+                                   });
+                                   
+                                   // Add popup with information
+                                   const name = getFeatureName(feature.properties);
+                                   circle.bindPopup(`<strong>Overlapping WDPA:</strong> ${name}`);
+                                   
+                                   // Add to the highlight layer
+                                   circle.addTo(highlightLayer);
+                               } catch (e) {
+                                   console.error("Error highlighting WDPA:", e);
+                               }
+                           }
+                       });
+                       
+                       updateStatus(`Added red circles to ${overlappingWdpaIds.size} overlapping WDPAs`);
+                       
+                       // Set up overlap area filter
+                       const minAreaSlider = document.getElementById('min-area');
+                       const areaValueDisplay = document.getElementById('area-value');
+                       const applyFilterBtn = document.getElementById('apply-filter');
+                       const resetFilterBtn = document.getElementById('reset-filter');
+                       
+                       // Update the display when slider changes
+                       minAreaSlider.addEventListener('input', function() {
+                           areaValueDisplay.textContent = this.value;
+                       });
+                       
+                       // Apply filter on button click
+                       applyFilterBtn.addEventListener('click', function() {
+                           const minArea = parseInt(minAreaSlider.value, 10);
+                           
+                           // Filter the features based on area
+                           const filteredFeatures = {
+                               type: "FeatureCollection",
+                               features: originalOverlapFeatures.features.filter(feature => 
+                                   feature.properties.overlap_area >= minArea
+                               )
+                           };
+                           
+                           // Update display with filtered features
+                           overlapLayer.clearLayers();
+                           filteredGeoJSONLayer = L.geoJSON(filteredFeatures, {
+                               style: {
+                                   color: 'purple',
+                                   fillColor: 'purple',
+                                   weight: 2,
+                                   opacity: 0.9,
+                                   fillOpacity: 0.7
+                               },
+                               onEachFeature: function(feature, layer) {
+                                   let html = '<div><strong>Overlap Area (ISRA + WDPA)</strong><br/>';
+                                   if (feature.properties) {
+                                       if (feature.properties.isra_name) {
+                                           html += `<strong>ISRA:</strong> ${feature.properties.isra_name}<br/>`;
+                                       }
+                                       if (feature.properties.wdpa_name) {
+                                           html += `<strong>Protected Area:</strong> ${feature.properties.wdpa_name}<br/>`;
+                                       }
+                                       if (feature.properties.overlap_area) {
+                                           html += `<strong>Area:</strong> ${Math.round(feature.properties.overlap_area)} sq km`;
+                                       }
+                                   }
+                                   html += '</div>';
+                                   layer.bindPopup(html);
+                               }
+                           }).addTo(overlapLayer);
+                           
+                           // Update stats for filtered overlaps
+                           updateOverlapStats(filteredFeatures);
+                       });
+                       
+                       // Reset filter on button click
+                       resetFilterBtn.addEventListener('click', function() {
+                           minAreaSlider.value = 0;
+                           areaValueDisplay.textContent = '0';
+                           
+                           // Restore original features
+                           overlapLayer.clearLayers();
+                           filteredGeoJSONLayer = L.geoJSON(originalOverlapFeatures, {
+                               style: {
+                                   color: 'purple',
+                                   fillColor: 'purple',
+                                   weight: 2,
+                                   opacity: 0.9,
+                                   fillOpacity: 0.7
+                               },
+                               onEachFeature: function(feature, layer) {
+                                   let html = '<div><strong>Overlap Area (ISRA + WDPA)</strong><br/>';
+                                   if (feature.properties) {
+                                       if (feature.properties.isra_name) {
+                                           html += `<strong>ISRA:</strong> ${feature.properties.isra_name}<br/>`;
+                                       }
+                                       if (feature.properties.wdpa_name) {
+                                           html += `<strong>Protected Area:</strong> ${feature.properties.wdpa_name}<br/>`;
+                                       }
+                                       if (feature.properties.overlap_area) {
+                                           html += `<strong>Area:</strong> ${Math.round(feature.properties.overlap_area)} sq km`;
+                                       }
+                                   }
+                                   html += '</div>';
+                                   layer.bindPopup(html);
+                               }
+                           }).addTo(overlapLayer);
+                           
+                           // Update stats for all overlaps
+                           updateOverlapStats(originalOverlapFeatures);
+                       });
+                       
+                   } else {
+                       updateStatus("Cannot calculate overlaps: Missing either ISRAs or WDPA data", true);
+                   }
+                   
+                   // Add layer controls with better organization
+                   const baseMaps = {
+                       "OpenStreetMap": osmLayer,
+                       "Satellite": satelliteLayer,
+                       "Topographic": topoLayer
+                   };
+                   
+                   const overlayMaps = {
+                       // Base layers
+                       "African Countries": countriesLayer,
+                       "Areas of Interest (AOI)": aoiLayer,
+                       "CISRA - Region 3": cisraLayer,
+                       
+                       // ISRA layers
+                       "ISRAs - Morocco": israelMoroccoLayer,
+                       "ISRAs - Tunisia": israelTunisiaLayer,
+                       "ISRAs - Libya": israelLibyaLayer,
+                       
+                       // WDPA layers
+                       "WDPA (Protected Areas)": wdpaLayer,
+                       "WDPA Points": wdpaPointsLayer,
+                       
+                       // Analysis layers
+                       "Overlap Areas (ISRAs + WDPA)": overlapLayer,
+                       "Overlapping WDPAs (Red Circles)": highlightLayer
+                   };
+                   
+                   L.control.layers(baseMaps, overlayMaps, {
+                       collapsed: false,
+                       position: 'topright'
+                   }).addTo(map);
+                   
+                   // Add zoom control to top-left corner
+                   L.control.zoom({
+                       position: 'topleft'
+                   }).addTo(map);
+                   
+                   // Add scale bar
+                   L.control.scale({
+                       imperial: false,
+                       metric: true,
+                       position: 'bottomleft'
+                   }).addTo(map);
+                   
+                   updateStatus("Map setup complete!");
+                   
+                   // Auto-hide status after 8 seconds
+                   setTimeout(() => {
+                       const status = document.getElementById('status');
+                       if (status) {
+                           status.style.display = 'none';
+                       }
+                   }, 8000);
+                   
+               } catch (error) {
+                   updateStatus(`General error loading data: ${error.message}`, true);
+                   console.error("Error loading data:", error);
+               }
+           }
+           
+           // Function to calculate overlaps between two GeoJSON datasets
+           function calculateOverlaps(dataset1, dataset2) {
+               const overlaps = {
+                   type: "FeatureCollection",
+                   features: []
+               };
+               
+               // Loop through each feature in dataset1
+               dataset1.features.forEach(feature1 => {
+                   // Loop through each feature in dataset2
+                   dataset2.features.forEach(feature2 => {
+                       try {
+                           // Calculate intersection using turf.js
+                           const intersection = turf.intersect(feature1, feature2);
+                           
+                           // If there is an overlap
+                           if (intersection) {
+                               // Calculate area in square kilometers
+                               const area = turf.area(intersection) / 1000000; // convert m² to km²
+                               
+                               // Add properties
+                               intersection.properties = {
+                                   isra_id: feature1.properties?.id || "Unknown ID",
+                                   isra_name: getFeatureName(feature1.properties),
+                                   wdpa_id: feature2.properties?.id || feature2.id || "Unknown ID",
+                                   wdpa_name: getFeatureName(feature2.properties),
+                                   overlap_area: area
+                               };
+                               
+                               // Add to overlaps collection
+                               overlaps.features.push(intersection);
+                           }
+                       } catch (error) {
+                           console.error("Error calculating intersection:", error);
+                       }
+                   });
+               });
+               
+               return overlaps;
+           }
+           
+           // Load data
+           loadData();
+       });
+   </script>
 </body>
 </html>
