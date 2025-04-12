@@ -71,15 +71,22 @@
             border-radius: 4px;
             box-shadow: 0 0 10px rgba(0,0,0,0.2);
             max-width: 300px;
-            max-height: 200px;
+            max-height: 300px;
             overflow-y: auto;
             font-size: 12px;
+        }
+        #loading-status {
+            max-height: 200px;
+            overflow-y: auto;
         }
         .error {
             color: red;
         }
         .success {
             color: green;
+        }
+        .warning {
+            color: orange;
         }
         .leaflet-control-layers {
             max-height: 300px;
@@ -123,6 +130,20 @@
             font-weight: bold;
             box-shadow: 0 0 3px rgba(0,0,0,0.2);
         }
+        #progress-container {
+            margin-top: 10px;
+            width: 100%;
+            height: 20px;
+            background-color: #f1f1f1;
+            border-radius: 4px;
+            overflow: hidden;
+        }
+        #progress-bar {
+            height: 100%;
+            width: 0%;
+            background-color: #4CAF50;
+            transition: width 0.3s;
+        }
     </style>
 </head>
 <body>
@@ -136,6 +157,9 @@
     <div id="status">
         <span class="hide-status" onclick="this.parentElement.style.display='none'">✕</span>
         <h3>Data Loading Status</h3>
+        <div id="progress-container">
+            <div id="progress-bar"></div>
+        </div>
         <div id="loading-status"></div>
     </div>
     
@@ -146,7 +170,7 @@
         <p id="overlap-stats">Calculating overlaps...</p>
     </div>
     
-    <div id="filter-control">
+    <div id="filter-control" style="display: none;">
         <h3>Filter Overlapping Areas</h3>
         <label for="min-area">Minimum Area (sq km): </label>
         <input type="range" id="min-area" min="0" max="500" value="0" step="10">
@@ -229,14 +253,85 @@
                    "Unnamed Area";
         }
         
-        // Status display function
-        function updateStatus(message, isError = false) {
+        // Progress tracking
+        let totalSteps = 10;
+        let completedSteps = 0;
+        
+        function updateProgressBar() {
+            const percentage = Math.min((completedSteps / totalSteps) * 100, 100);
+            document.getElementById('progress-bar').style.width = percentage + '%';
+        }
+        
+        // Status display function with improved formatting and progress tracking
+        function updateStatus(message, isError = false, isWarning = false) {
             const statusDiv = document.getElementById('loading-status');
             const messageElement = document.createElement('p');
-            messageElement.textContent = message;
-            messageElement.className = isError ? 'error' : 'success';
+            
+            // Add timestamp
+            const now = new Date();
+            const timestamp = `${now.getHours()}:${now.getMinutes()}:${now.getSeconds()}`;
+            
+            messageElement.textContent = `[${timestamp}] ${message}`;
+            
+            if (isError) {
+                messageElement.className = 'error';
+                console.error(message);
+            } else if (isWarning) {
+                messageElement.className = 'warning';
+                console.warn(message);
+            } else {
+                messageElement.className = 'success';
+                console.log(message);
+                
+                // Update progress for successful steps
+                completedSteps++;
+                updateProgressBar();
+            }
+            
             statusDiv.appendChild(messageElement);
-            console.log(isError ? `ERROR: ${message}` : message);
+            
+            // Auto-scroll to bottom
+            statusDiv.scrollTop = statusDiv.scrollHeight;
+        }
+        
+        // Enhanced fetch with retry, timeout, and error handling
+        async function fetchWithRetry(url, retries = 3, timeout = 30000) {
+            for (let i = 0; i < retries; i++) {
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), timeout);
+                
+                try {
+                    updateStatus(`Attempt ${i+1} to fetch ${url}...`, false, i > 0);
+                    
+                    const response = await fetch(url, { signal: controller.signal });
+                    clearTimeout(timeoutId);
+                    
+                    if (!response.ok) {
+                        throw new Error(`HTTP error! status: ${response.status}`);
+                    }
+                    
+                    const text = await response.text();
+                    updateStatus(`Successfully fetched ${url}`, false);
+                    return text;
+                } catch (error) {
+                    clearTimeout(timeoutId);
+                    
+                    if (error.name === 'AbortError') {
+                        updateStatus(`Timeout fetching ${url}`, false, true);
+                    } else {
+                        updateStatus(`Attempt ${i+1} failed for ${url}: ${error.message}`, false, true);
+                    }
+                    
+                    if (i === retries - 1) {
+                        throw error;
+                    }
+                    
+                    // Wait before retry with exponential backoff
+                    const waitTime = Math.min(1000 * Math.pow(2, i), 10000);
+                    updateStatus(`Waiting ${waitTime/1000}s before retry...`, false, true);
+                    await new Promise(r => setTimeout(r, waitTime));
+                }
+            }
         }
         
         // Overlap stats update function
@@ -260,62 +355,92 @@
         
         // Make sure the map container is ready
         document.addEventListener('DOMContentLoaded', function() {
-            // Initialize map - using setView instead of options object
-            var map = L.map('map').setView([34.0, 12.0], 5);
+            updateStatus("Application initializing...");
             
-            // Add basemap with multiple options
-            const osmLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-                attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-                maxZoom: 19
-            }).addTo(map);
-            
-            const satelliteLayer = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
-                attribution: 'Tiles &copy; Esri &mdash; Source: Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EGP, and the GIS User Community',
-                maxZoom: 19
-            });
-            
-            const topoLayer = L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', {
-                attribution: 'Map data: &copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors, <a href="http://viewfinderpanoramas.org">SRTM</a> | Map style: &copy; <a href="https://opentopomap.org">OpenTopoMap</a> (<a href="https://creativecommons.org/licenses/by-sa/3.0/">CC-BY-SA</a>)',
-                maxZoom: 17
-            });
-            
-            // Create layer groups
-            const countriesLayer = L.layerGroup().addTo(map);
-            const aoiLayer = L.layerGroup().addTo(map);
-            const cisraLayer = L.layerGroup().addTo(map);
-            const israelMoroccoLayer = L.layerGroup().addTo(map);
-            const israelTunisiaLayer = L.layerGroup().addTo(map);
-            const israelLibyaLayer = L.layerGroup().addTo(map);
-            const wdpaLayer = L.layerGroup().addTo(map);
-            const wdpaPointsLayer = L.layerGroup().addTo(map);
-            const overlapLayer = L.layerGroup().addTo(map);
-            const highlightLayer = L.layerGroup().addTo(map); // New layer for red circles
-            
-            // Variables to store original overlap features and filtered features
-            let originalOverlapFeatures = null;
-            let filteredGeoJSONLayer = null;
-            
-            // Function to load GeoJSON data
-            async function loadData() {
-                try {
-                    updateStatus("Starting to load data...");
+            try {
+                // Check if we're running on GitHub Pages
+                if (window.location.hostname.includes('github.io')) {
+                    updateStatus("Running on GitHub Pages", false, false);
+                }
+                
+                // Initialize map
+                updateStatus("Initializing map...");
+                var map = L.map('map').setView([34.0, 12.0], 5);
+                updateStatus("Map initialized successfully");
+                
+                // Add basemap with multiple options
+                const osmLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+                    maxZoom: 19
+                }).addTo(map);
+                
+                const satelliteLayer = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+                    attribution: 'Tiles &copy; Esri &mdash; Source: Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EGP, and the GIS User Community',
+                    maxZoom: 19
+                });
+                
+                const topoLayer = L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', {
+                    attribution: 'Map data: &copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors, <a href="http://viewfinderpanoramas.org">SRTM</a> | Map style: &copy; <a href="https://opentopomap.org">OpenTopoMap</a> (<a href="https://creativecommons.org/licenses/by-sa/3.0/">CC-BY-SA</a>)',
+                    maxZoom: 17
+                });
+                
+                updateStatus("Base maps loaded successfully");
+                
+                // Create layer groups
+                const countriesLayer = L.layerGroup().addTo(map);
+                const aoiLayer = L.layerGroup().addTo(map);
+                const cisraLayer = L.layerGroup().addTo(map);
+                const israelMoroccoLayer = L.layerGroup().addTo(map);
+                const israelTunisiaLayer = L.layerGroup().addTo(map);
+                const israelLibyaLayer = L.layerGroup().addTo(map);
+                const wdpaLayer = L.layerGroup().addTo(map);
+                const wdpaPointsLayer = L.layerGroup().addTo(map);
+                const overlapLayer = L.layerGroup().addTo(map);
+                const highlightLayer = L.layerGroup().addTo(map);
+                
+                // Variables to store original overlap features and filtered features
+                let originalOverlapFeatures = null;
+                let filteredGeoJSONLayer = null;
+                
+                // Function to test file access
+                async function testFileAccess() {
+                    const files = [
+                        'data/isra_region03_morocco.geojson',
+                        'data/isra_region03_tunisia.geojson',
+                        'data/isra_region03_libya.geojson',
+                        'data/WDPA.geojson'
+                    ];
                     
-                    // Load African Countries
-                    updateStatus("Loading African Countries...");
-                    try {
-                        const countriesResponse = await fetch('data/AFRICA COUNTRIES.geojson');
-                        if (!countriesResponse.ok) {
-                            throw new Error(`HTTP error! status: ${countriesResponse.status}`);
-                        }
-                        const text = await countriesResponse.text();
+                    updateStatus("Testing file access...");
+                    for (const file of files) {
                         try {
-                            const countriesData = JSON.parse(text);
-                            updateStatus("African Countries loaded successfully");
-                            
-                            // Log the first feature's properties to see what's available
-                            if (countriesData.features && countriesData.features.length > 0) {
-                                console.log("African Countries properties:", countriesData.features[0].properties);
+                            const response = await fetch(file);
+                            if (response.ok) {
+                                updateStatus(`File accessible: ${file}`);
+                            } else {
+                                updateStatus(`File not accessible: ${file} (${response.status})`, false, true);
                             }
+                        } catch (error) {
+                            updateStatus(`Error accessing file: ${file} - ${error.message}`, true);
+                        }
+                    }
+                }
+                
+                // Function to load GeoJSON data
+                async function loadData() {
+                    try {
+                        updateStatus("Starting to load data...");
+                        
+                        // Test file access first
+                        await testFileAccess();
+                        
+                        // Load African Countries
+                        let countriesData = null;
+                        try {
+                            updateStatus("Loading African Countries...");
+                            const text = await fetchWithRetry('./data/AFRICA COUNTRIES.geojson');
+                            countriesData = JSON.parse(text);
+                            updateStatus("African Countries data parsed successfully");
                             
                             // Create country boundaries with labels
                             L.geoJSON(countriesData, {
@@ -329,12 +454,12 @@
                                 onEachFeature: function(feature, layer) {
                                     // Try different property names for country name
                                     const name = feature.properties?.CNTRY_NAME || 
-                                                 feature.properties?.NAME || 
-                                                 feature.properties?.name || 
-                                                 feature.properties?.Country ||
-                                                 feature.properties?.COUNTRY ||
-                                                 feature.properties?.country ||
-                                                 "Unnamed Country";
+                                                feature.properties?.NAME || 
+                                                feature.properties?.name || 
+                                                feature.properties?.Country ||
+                                                feature.properties?.COUNTRY ||
+                                                feature.properties?.country ||
+                                                "Unnamed Country";
                                     
                                     // Add popup
                                     layer.bindPopup(`<strong>Country:</strong> ${name}`);
@@ -361,31 +486,19 @@
                                     }
                                 }
                             }).addTo(countriesLayer);
-                        } catch (e) {
-                            updateStatus(`Error parsing African Countries as JSON: ${e.message}`, true);
-                            console.error(`First 100 chars of response: ${text.substring(0, 100)}`);
+                            updateStatus("African Countries added to map");
+                        } catch (error) {
+                            updateStatus(`Error with African Countries: ${error.message}`, true);
+                            console.error("Detailed error:", error);
                         }
-                    } catch (error) {
-                        updateStatus(`Error loading African Countries: ${error.message}`, true);
-                    }
-                    
-                    // Load AOI Regions
-                    updateStatus("Loading AOI Regions...");
-                    let aoiData = null;
-                    try {
-                        const aoiResponse = await fetch('data/aoi_region03.geojson');
-                        if (!aoiResponse.ok) {
-                            throw new Error(`HTTP error! status: ${aoiResponse.status}`);
-                        }
-                        const text = await aoiResponse.text();
+                        
+                        // Load AOI Regions
+                        let aoiData = null;
                         try {
+                            updateStatus("Loading AOI Regions...");
+                            const text = await fetchWithRetry('./data/aoi_region03.geojson');
                             aoiData = JSON.parse(text);
-                            updateStatus("AOI Regions loaded successfully");
-                            
-                            // Log the first feature's properties
-                            if (aoiData.features && aoiData.features.length > 0) {
-                                console.log("AOI properties:", aoiData.features[0].properties);
-                            }
+                            updateStatus("AOI Regions data parsed successfully");
                             
                             L.geoJSON(aoiData, {
                                 style: {
@@ -400,31 +513,19 @@
                                     layer.bindPopup(`<strong>AOI Region:</strong> ${name}`);
                                 }
                             }).addTo(aoiLayer);
-                        } catch (e) {
-                            updateStatus(`Error parsing AOI Regions as JSON: ${e.message}`, true);
-                            console.error(`First 100 chars of response: ${text.substring(0, 100)}`);
+                            updateStatus("AOI Regions added to map");
+                        } catch (error) {
+                            updateStatus(`Error with AOI Regions: ${error.message}`, true);
+                            console.error("Detailed error:", error);
                         }
-                    } catch (error) {
-                        updateStatus(`Error loading AOI Regions: ${error.message}`, true);
-                    }
-                    
-                    // Load CISRA - Region 3
-                    updateStatus("Loading CISRA Region 3...");
-                    let cisraData = null;
-                    try {
-                        const cisraResponse = await fetch('data/cisra_region03.geojson');
-                        if (!cisraResponse.ok) {
-                            throw new Error(`HTTP error! status: ${cisraResponse.status}`);
-                        }
-                        const text = await cisraResponse.text();
+                        
+                        // Load CISRA - Region 3
+                        let cisraData = null;
                         try {
+                            updateStatus("Loading CISRA Region 3...");
+                            const text = await fetchWithRetry('./data/cisra_region03.geojson');
                             cisraData = JSON.parse(text);
-                            updateStatus("CISRA Region 3 loaded successfully");
-                            
-                            // Log properties
-                            if (cisraData.features && cisraData.features.length > 0) {
-                                console.log("CISRA properties:", cisraData.features[0].properties);
-                            }
+                            updateStatus("CISRA Region 3 data parsed successfully");
                             
                             L.geoJSON(cisraData, {
                                 style: {
@@ -439,31 +540,19 @@
                                     layer.bindPopup(`<strong>CISRA Region 3:</strong> ${name}`);
                                 }
                             }).addTo(cisraLayer);
-                        } catch (e) {
-                            updateStatus(`Error parsing CISRA Region 3 as JSON: ${e.message}`, true);
-                            console.error(`First 100 chars of response: ${text.substring(0, 100)}`);
+                            updateStatus("CISRA Region 3 added to map");
+                        } catch (error) {
+                            updateStatus(`Error with CISRA Region 3: ${error.message}`, true);
+                            console.error("Detailed error:", error);
                         }
-                    } catch (error) {
-                        updateStatus(`Error loading CISRA Region 3: ${error.message}`, true);
-                    }
-                    
-                    // Load ISRAs - Morocco
-                    updateStatus("Loading ISRAs - Morocco...");
-                    let israMoroccoData = null;
-                    try {
-                        const moroccoResponse = await fetch('data/isra_region03_morocco.geojson');
-                        if (!moroccoResponse.ok) {
-                            throw new Error(`HTTP error! status: ${moroccoResponse.status}`);
-                        }
-                        const text = await moroccoResponse.text();
+                        
+                        // Load ISRAs - Morocco
+                        let israMoroccoData = null;
                         try {
+                            updateStatus("Loading ISRAs - Morocco...");
+                            const text = await fetchWithRetry('./data/isra_region03_morocco.geojson');
                             israMoroccoData = JSON.parse(text);
-                            updateStatus("ISRAs Morocco loaded successfully");
-                            
-                            // Log properties to help debug
-                            if (israMoroccoData.features && israMoroccoData.features.length > 0) {
-                                console.log("Morocco ISRA properties:", israMoroccoData.features[0].properties);
-                            }
+                            updateStatus("ISRAs Morocco data parsed successfully");
                             
                             L.geoJSON(israMoroccoData, {
                                 style: {
@@ -478,31 +567,19 @@
                                     layer.bindPopup(`<strong>ISRA Morocco:</strong> ${name}`);
                                 }
                             }).addTo(israelMoroccoLayer);
-                        } catch (e) {
-                            updateStatus(`Error parsing ISRAs Morocco as JSON: ${e.message}`, true);
-                            console.error(`First 100 chars of response: ${text.substring(0, 100)}`);
+                            updateStatus("ISRAs Morocco added to map");
+                        } catch (error) {
+                            updateStatus(`Error with ISRAs Morocco: ${error.message}`, true);
+                            console.error("Detailed error:", error);
                         }
-                    } catch (error) {
-                        updateStatus(`Error loading ISRAs Morocco: ${error.message}`, true);
-                    }
-                    
-                    // Load ISRAs - Tunisia
-                    updateStatus("Loading ISRAs - Tunisia...");
-                    let israTunisiaData = null;
-                    try {
-                        const tunisiaResponse = await fetch('data/isra_region03_tunisia.geojson');
-                        if (!tunisiaResponse.ok) {
-                            throw new Error(`HTTP error! status: ${tunisiaResponse.status}`);
-                        }
-                        const text = await tunisiaResponse.text();
+                        
+                        // Load ISRAs - Tunisia
+                        let israTunisiaData = null;
                         try {
+                            updateStatus("Loading ISRAs - Tunisia...");
+                            const text = await fetchWithRetry('./data/isra_region03_tunisia.geojson');
                             israTunisiaData = JSON.parse(text);
-                            updateStatus("ISRAs Tunisia loaded successfully");
-                            
-                            // Log properties
-                            if (israTunisiaData.features && israTunisiaData.features.length > 0) {
-                                console.log("Tunisia ISRA properties:", israTunisiaData.features[0].properties);
-                            }
+                            updateStatus("ISRAs Tunisia data parsed successfully");
                             
                             L.geoJSON(israTunisiaData, {
                                 style: {
@@ -517,31 +594,19 @@
                                     layer.bindPopup(`<strong>ISRA Tunisia:</strong> ${name}`);
                                 }
                             }).addTo(israelTunisiaLayer);
-                        } catch (e) {
-                            updateStatus(`Error parsing ISRAs Tunisia as JSON: ${e.message}`, true);
-                            console.error(`First 100 chars of response: ${text.substring(0, 100)}`);
+                            updateStatus("ISRAs Tunisia added to map");
+                        } catch (error) {
+                            updateStatus(`Error with ISRAs Tunisia: ${error.message}`, true);
+                            console.error("Detailed error:", error);
                         }
-                    } catch (error) {
-                        updateStatus(`Error loading ISRAs Tunisia: ${error.message}`, true);
-                    }
-                    
-                    // Load ISRAs - Libya
-                    updateStatus("Loading ISRAs - Libya...");
-                    let israLibyaData = null;
-                    try {
-                        const libyaResponse = await fetch('data/isra_region03_libya.geojson');
-                        if (!libyaResponse.ok) {
-                            throw new Error(`HTTP error! status: ${libyaResponse.status}`);
-                        }
-                        const text = await libyaResponse.text();
+                        
+                        // Load ISRAs - Libya
+                        let israLibyaData = null;
                         try {
+                            updateStatus("Loading ISRAs - Libya...");
+                            const text = await fetchWithRetry('./data/isra_region03_libya.geojson');
                             israLibyaData = JSON.parse(text);
-                            updateStatus("ISRAs Libya loaded successfully");
-                            
-                            // Log properties
-                            if (israLibyaData.features && israLibyaData.features.length > 0) {
-                                console.log("Libya ISRA properties:", israLibyaData.features[0].properties);
-                            }
+                            updateStatus("ISRAs Libya data parsed successfully");
                             
                             L.geoJSON(israLibyaData, {
                                 style: {
@@ -556,32 +621,20 @@
                                     layer.bindPopup(`<strong>ISRA Libya:</strong> ${name}`);
                                 }
                             }).addTo(israelLibyaLayer);
-                        } catch (e) {
-                            updateStatus(`Error parsing ISRAs Libya as JSON: ${e.message}`, true);
-                            console.error(`First 100 chars of response: ${text.substring(0, 100)}`);
+                            updateStatus("ISRAs Libya added to map");
+                        } catch (error) {
+                            updateStatus(`Error with ISRAs Libya: ${error.message}`, true);
+                            console.error("Detailed error:", error);
                         }
-                    } catch (error) {
-                        updateStatus(`Error loading ISRAs Libya: ${error.message}`, true);
-                    }
-                    
-                    // Load WDPA (World Database on Protected Areas)
-                    updateStatus("Loading WDPA...");
-                    let wdpaData = null;
-                    let wdpaFeatures = []; // To store individual WDPA features for later reference
-                    try {
-                        const wdpaResponse = await fetch('data/WDPA.geojson');
-                        if (!wdpaResponse.ok) {
-                            throw new Error(`HTTP error! status: ${wdpaResponse.status}`);
-                        }
-                        const text = await wdpaResponse.text();
+                        
+                        // Load WDPA (World Database on Protected Areas)
+                        let wdpaData = null;
+                        let wdpaFeatures = []; // To store individual WDPA features for later reference
                         try {
+                            updateStatus("Loading WDPA...");
+                            const text = await fetchWithRetry('./data/WDPA.geojson');
                             wdpaData = JSON.parse(text);
-                            updateStatus("WDPA loaded successfully");
-                            
-                            // Log properties
-                            if (wdpaData.features && wdpaData.features.length > 0) {
-                                console.log("WDPA properties:", wdpaData.features[0].properties);
-                            }
+                            updateStatus("WDPA data parsed successfully");
                             
                             // Store all WDPA features
                             wdpaFeatures = wdpaData.features;
@@ -606,30 +659,18 @@
                                     }
                                 }
                             }).addTo(wdpaLayer);
-                        } catch (e) {
-                            updateStatus(`Error parsing WDPA as JSON: ${e.message}`, true);
-                            console.error(`First 100 chars of response: ${text.substring(0, 100)}`);
+                            updateStatus("WDPA added to map");
+                        } catch (error) {
+                            updateStatus(`Error with WDPA: ${error.message}`, true);
+                            console.error("Detailed error:", error);
                         }
-                    } catch (error) {
-                        updateStatus(`Error loading WDPA: ${error.message}`, true);
-                    }
-                    
-                    // Load WDPA Points - Using simple black circles
-                    updateStatus("Loading WDPA Points...");
-                    try {
-                        const wdpaPointsResponse = await fetch('data/WDPA_points.geojson');
-                        if (!wdpaPointsResponse.ok) {
-                            throw new Error(`HTTP error! status: ${wdpaPointsResponse.status}`);
-                        }
-                        const text = await wdpaPointsResponse.text();
+                        
+                        // Load WDPA Points - Using simple black circles
                         try {
+                            updateStatus("Loading WDPA Points...");
+                            const text = await fetchWithRetry('./data/WDPA_points.geojson');
                             const wdpaPointsData = JSON.parse(text);
-                            updateStatus("WDPA Points loaded successfully");
-                            
-                            // Log properties
-                            if (wdpaPointsData.features && wdpaPointsData.features.length > 0) {
-                                console.log("WDPA Points properties:", wdpaPointsData.features[0].properties);
-                            }
+                            updateStatus("WDPA Points data parsed successfully");
                             
                             L.geoJSON(wdpaPointsData, {
                                 pointToLayer: function(feature, latlng) {
@@ -648,328 +689,367 @@
                                     layer.bindPopup(`<strong>WDPA Point:</strong> ${name}`);
                                 }
                             }).addTo(wdpaPointsLayer);
-                        } catch (e) {
-                            updateStatus(`Error parsing WDPA Points as JSON: ${e.message}`, true);
-                            console.error(`First 100 chars of response: ${text.substring(0, 100)}`);
+                            updateStatus("WDPA Points added to map");
+                        } catch (error) {
+                            updateStatus(`Error with WDPA Points: ${error.message}`, true);
+                            console.error("Detailed error:", error);
                         }
-                    } catch (error) {
-                        updateStatus(`Error loading WDPA Points: ${error.message}`, true);
-                    }
-                    
-                    // Sets to track overlapping WDPAs
-                    const overlappingWdpaIds = new Set();
-                    
-                    // Combine all ISRA data for overlaps
-                    const allIsras = {
-                        type: "FeatureCollection",
-                        features: [
+                        
+                        // Sets to track overlapping WDPAs
+                        const overlappingWdpaIds = new Set();
+                        
+                        // Calculate overlaps between all ISRAs and WDPAs
+                        updateStatus("Beginning overlap calculations...");
+                        
+                        // Create array of loaded ISRA features
+                        const isra_features = [
                             ...(israMoroccoData?.features || []),
                             ...(israTunisiaData?.features || []),
                             ...(israLibyaData?.features || [])
-                        ]
+                        ];
+                        
+                        if (isra_features.length === 0) {
+                            updateStatus("No ISRA features loaded - cannot calculate overlaps", true);
+                        } else if (!wdpaData || !wdpaData.features) {
+                            updateStatus("No WDPA features loaded - cannot calculate overlaps", true);
+                        } else {
+                            updateStatus(`Found ${isra_features.length} ISRA features and ${wdpaData.features.length} WDPA features`);
+                            
+                            // Combine all ISRA data for overlaps
+                            const allIsras = {
+                                type: "FeatureCollection",
+                                features: isra_features
+                            };
+                            
+                            updateStatus("Starting overlap calculation...");
+                            // Calculate and display overlaps
+                            const isra_wdpa_overlaps = calculateOverlaps(allIsras, wdpaData);
+                            updateStatus(`Overlap calculation complete - found ${isra_wdpa_overlaps.features.length} overlapping areas`);
+                            
+                            // Show filter control now that we have overlaps
+                            document.getElementById('filter-control').style.display = 'block';
+                            
+                          // Store original overlaps for filtering
+                          originalOverlapFeatures = isra_wdpa_overlaps;
+                            
+                            // Update overlap stats
+                            updateOverlapStats(isra_wdpa_overlaps);
+                            
+                            // Track WDPAs that overlap with ISRAs
+                            isra_wdpa_overlaps.features.forEach(feature => {
+                                if (feature.properties && feature.properties.wdpa_id) {
+                                    overlappingWdpaIds.add(feature.properties.wdpa_id);
+                                }
+                            });
+                            
+                            // Display overlap areas
+                            updateStatus("Adding overlap areas to map...");
+                            filteredGeoJSONLayer = L.geoJSON(isra_wdpa_overlaps, {
+                                style: {
+                                    color: 'purple',
+                                    fillColor: 'purple',
+                                    weight: 2,
+                                    opacity: 0.9,
+                                    fillOpacity: 0.7
+                                },
+                                onEachFeature: function(feature, layer) {
+                                    let html = '<div><strong>Overlap Area (ISRA + WDPA)</strong><br/>';
+                                    if (feature.properties) {
+                                        if (feature.properties.isra_name) {
+                                            html += `<strong>ISRA:</strong> ${feature.properties.isra_name}<br/>`;
+                                        }
+                                        if (feature.properties.wdpa_name) {
+                                            html += `<strong>Protected Area:</strong> ${feature.properties.wdpa_name}<br/>`;
+                                        }
+                                        if (feature.properties.overlap_area) {
+                                            html += `<strong>Area:</strong> ${Math.round(feature.properties.overlap_area)} sq km`;
+                                        }
+                                    }
+                                    html += '</div>';
+                                    layer.bindPopup(html);
+                                }
+                            }).addTo(overlapLayer);
+                            updateStatus("Overlap areas added to map");
+                            
+                            // Add red circles around overlapping WDPAs
+                            updateStatus(`Adding red circles around ${overlappingWdpaIds.size} overlapping WDPAs...`);
+                            
+                            // Process each WDPA feature to highlight those that overlap with ISRAs
+                            let circlesAdded = 0;
+                            wdpaFeatures.forEach(feature => {
+                                const featureId = feature.properties?.id || feature.id;
+                                
+                                // If this WDPA overlaps with ISRAs
+                                if (overlappingWdpaIds.has(featureId)) {
+                                    try {
+                                        // Get the center of the WDPA polygon
+                                        const center = turf.center(feature);
+                                        const centerCoords = center.geometry.coordinates;
+                                        
+                                        // Calculate approximate radius based on feature size
+                                        let radius = 10000; // Default 10km
+                                        
+                                        try {
+                                            // Try to calculate a better radius based on the area
+                                            const area = turf.area(feature);
+                                            radius = Math.sqrt(area / Math.PI); // r = sqrt(A/π)
+                                            
+                                            // Add some buffer, but keep it reasonable
+                                            radius = Math.max(5000, Math.min(radius * 1.2, 50000));
+                                        } catch (e) {
+                                            console.error("Error calculating radius:", e);
+                                        }
+                                        
+                                        // Create a red circle
+                                        const circle = L.circle([centerCoords[1], centerCoords[0]], {
+                                            color: 'red',
+                                            fillColor: 'transparent',
+                                            fillOpacity: 0,
+                                            weight: 3,
+                                            radius: radius
+                                        });
+                                        
+                                        // Add popup with information
+                                        const name = getFeatureName(feature.properties);
+                                        circle.bindPopup(`<strong>Overlapping WDPA:</strong> ${name}`);
+                                        
+                                        // Add to the highlight layer
+                                        circle.addTo(highlightLayer);
+                                        circlesAdded++;
+                                    } catch (e) {
+                                        console.error("Error highlighting WDPA:", e);
+                                    }
+                                }
+                            });
+                            
+                            updateStatus(`Added ${circlesAdded} red circles to overlapping WDPAs`);
+                            
+                            // Set up overlap area filter
+                            const minAreaSlider = document.getElementById('min-area');
+                            const areaValueDisplay = document.getElementById('area-value');
+                            const applyFilterBtn = document.getElementById('apply-filter');
+                            const resetFilterBtn = document.getElementById('reset-filter');
+                            
+                            // Update the display when slider changes
+                            minAreaSlider.addEventListener('input', function() {
+                                areaValueDisplay.textContent = this.value;
+                            });
+                            
+                            // Apply filter on button click
+                            applyFilterBtn.addEventListener('click', function() {
+                                const minArea = parseInt(minAreaSlider.value, 10);
+                                updateStatus(`Filtering overlaps by minimum area: ${minArea} sq km`);
+                                
+                                // Filter the features based on area
+                                const filteredFeatures = {
+                                    type: "FeatureCollection",
+                                    features: originalOverlapFeatures.features.filter(feature => 
+                                        feature.properties.overlap_area >= minArea
+                                    )
+                                };
+                                
+                                // Update display with filtered features
+                                overlapLayer.clearLayers();
+                                filteredGeoJSONLayer = L.geoJSON(filteredFeatures, {
+                                    style: {
+                                        color: 'purple',
+                                        fillColor: 'purple',
+                                        weight: 2,
+                                        opacity: 0.9,
+                                        fillOpacity: 0.7
+                                    },
+                                    onEachFeature: function(feature, layer) {
+                                        let html = '<div><strong>Overlap Area (ISRA + WDPA)</strong><br/>';
+                                        if (feature.properties) {
+                                            if (feature.properties.isra_name) {
+                                                html += `<strong>ISRA:</strong> ${feature.properties.isra_name}<br/>`;
+                                            }
+                                            if (feature.properties.wdpa_name) {
+                                                html += `<strong>Protected Area:</strong> ${feature.properties.wdpa_name}<br/>`;
+                                            }
+                                            if (feature.properties.overlap_area) {
+                                                html += `<strong>Area:</strong> ${Math.round(feature.properties.overlap_area)} sq km`;
+                                            }
+                                        }
+                                        html += '</div>';
+                                        layer.bindPopup(html);
+                                    }
+                                }).addTo(overlapLayer);
+                                
+                                // Update stats for filtered overlaps
+                                updateOverlapStats(filteredFeatures);
+                                updateStatus(`Filter applied - showing ${filteredFeatures.features.length} overlaps`);
+                            });
+                            
+                            // Reset filter on button click
+                            resetFilterBtn.addEventListener('click', function() {
+                                updateStatus("Resetting overlap filter");
+                                minAreaSlider.value = 0;
+                                areaValueDisplay.textContent = '0';
+                                
+                                // Restore original features
+                                overlapLayer.clearLayers();
+                                filteredGeoJSONLayer = L.geoJSON(originalOverlapFeatures, {
+                                    style: {
+                                        color: 'purple',
+                                        fillColor: 'purple',
+                                        weight: 2,
+                                        opacity: 0.9,
+                                        fillOpacity: 0.7
+                                    },
+                                    onEachFeature: function(feature, layer) {
+                                        let html = '<div><strong>Overlap Area (ISRA + WDPA)</strong><br/>';
+                                        if (feature.properties) {
+                                            if (feature.properties.isra_name) {
+                                                html += `<strong>ISRA:</strong> ${feature.properties.isra_name}<br/>`;
+                                            }
+                                            if (feature.properties.wdpa_name) {
+                                                html += `<strong>Protected Area:</strong> ${feature.properties.wdpa_name}<br/>`;
+                                            }
+                                            if (feature.properties.overlap_area) {
+                                                html += `<strong>Area:</strong> ${Math.round(feature.properties.overlap_area)} sq km`;
+                                            }
+                                        }
+                                        html += '</div>';
+                                        layer.bindPopup(html);
+                                    }
+                                }).addTo(overlapLayer);
+                                
+                                // Update stats for all overlaps
+                                updateOverlapStats(originalOverlapFeatures);
+                                updateStatus("Filter reset - showing all overlaps");
+                            });
+                        }
+                        
+                        // Add layer controls with better organization
+                        updateStatus("Setting up layer controls...");
+                        const baseMaps = {
+                            "OpenStreetMap": osmLayer,
+                            "Satellite": satelliteLayer,
+                            "Topographic": topoLayer
+                        };
+                        
+                        const overlayMaps = {
+                            // Base layers
+                            "African Countries": countriesLayer,
+                            "Areas of Interest (AOI)": aoiLayer,
+                            "CISRA - Region 3": cisraLayer,
+                            
+                            // ISRA layers
+                            "ISRAs - Morocco": israelMoroccoLayer,
+                            "ISRAs - Tunisia": israelTunisiaLayer,
+                            "ISRAs - Libya": israelLibyaLayer,
+                            
+                            // WDPA layers
+                            "WDPA (Protected Areas)": wdpaLayer,
+                            "WDPA Points": wdpaPointsLayer,
+                            
+                            // Analysis layers
+                            "Overlap Areas (ISRAs + WDPA)": overlapLayer,
+                            "Overlapping WDPAs (Red Circles)": highlightLayer
+                        };
+                        
+                        L.control.layers(baseMaps, overlayMaps, {
+                            collapsed: false,
+                            position: 'topright'
+                        }).addTo(map);
+                        
+                        // Add zoom control to top-left corner
+                        L.control.zoom({
+                            position: 'topleft'
+                        }).addTo(map);
+                        
+                        // Add scale bar
+                        L.control.scale({
+                            imperial: false,
+                            metric: true,
+                            position: 'bottomleft'
+                        }).addTo(map);
+                        
+                        updateStatus("Map setup complete!");
+                        updateStatus("Application ready");
+                        
+                        // Auto-hide status after 15 seconds, but keep it if there were errors
+                        const statusDiv = document.getElementById('status');
+                        if (statusDiv.querySelectorAll('.error').length === 0) {
+                            setTimeout(() => {
+                                statusDiv.style.display = 'none';
+                            }, 15000);
+                        }
+                        
+                    } catch (error) {
+                        updateStatus(`General error loading data: ${error.message}`, true);
+                        console.error("Detailed error:", error);
+                        // Set progress to complete to avoid a hanging progress bar
+                        completedSteps = totalSteps;
+                        updateProgressBar();
+                    }
+                }
+                
+                // Function to calculate overlaps between two GeoJSON datasets
+                function calculateOverlaps(dataset1, dataset2) {
+                    const overlaps = {
+                        type: "FeatureCollection",
+                        features: []
                     };
                     
-                    // Calculate overlaps between all ISRAs and WDPAs
-                    if (allIsras.features.length > 0 && wdpaData) {
-                        updateStatus("Calculating overlaps between ISRAs and WDPAs...");
+                    updateStatus(`Starting overlap calculation between ${dataset1.features.length} and ${dataset2.features.length} features...`);
+                    let calculatedCount = 0;
+                    let overlapsFound = 0;
+                    
+                    // Loop through each feature in dataset1
+                    dataset1.features.forEach((feature1, index1) => {
+                        // Report progress periodically
+                        if (index1 % 5 === 0) {
+                            updateStatus(`Overlap calculation progress: ${index1}/${dataset1.features.length} features processed, ${overlapsFound} overlaps found`, false, false);
+                        }
                         
-                        // Calculate and display overlaps
-                        const isra_wdpa_overlaps = calculateOverlaps(allIsras, wdpaData);
-                        
-                        // Store original overlaps for filtering
-                        originalOverlapFeatures = isra_wdpa_overlaps;
-                        
-                        // Update overlap stats
-                        updateOverlapStats(isra_wdpa_overlaps);
-                        
-                        // Track WDPAs that overlap with ISRAs
-                        isra_wdpa_overlaps.features.forEach(feature => {
-                            if (feature.properties && feature.properties.wdpa_id) {
-                                overlappingWdpaIds.add(feature.properties.wdpa_id);
+                        // Loop through each feature in dataset2
+                        dataset2.features.forEach((feature2, index2) => {
+                            calculatedCount++;
+                            try {
+                                // Calculate intersection using turf.js
+                                const intersection = turf.intersect(feature1, feature2);
+                                
+                                // If there is an overlap
+                                if (intersection) {
+                                    // Calculate area in square kilometers
+                                    const area = turf.area(intersection) / 1000000; // convert m² to km²
+                                    
+                                    // Add properties
+                                    intersection.properties = {
+                                        isra_id: feature1.properties?.id || "Unknown ID",
+                                        isra_name: getFeatureName(feature1.properties),
+                                        wdpa_id: feature2.properties?.id || feature2.id || "Unknown ID",
+                                        wdpa_name: getFeatureName(feature2.properties),
+                                        overlap_area: area
+                                    };
+                                    
+                                    // Add to overlaps collection
+                                    overlaps.features.push(intersection);
+                                    overlapsFound++;
+                                }
+                            } catch (error) {
+                                console.error(`Error calculating intersection between features ${index1} and ${index2}:`, error);
                             }
                         });
-                        
-                        // Display overlap areas
-                        // Display overlap areas
-                       filteredGeoJSONLayer = L.geoJSON(isra_wdpa_overlaps, {
-                           style: {
-                               color: 'purple',
-                               fillColor: 'purple',
-                               weight: 2,
-                               opacity: 0.9,
-                               fillOpacity: 0.7
-                           },
-                           onEachFeature: function(feature, layer) {
-                               let html = '<div><strong>Overlap Area (ISRA + WDPA)</strong><br/>';
-                               if (feature.properties) {
-                                   if (feature.properties.isra_name) {
-                                       html += `<strong>ISRA:</strong> ${feature.properties.isra_name}<br/>`;
-                                   }
-                                   if (feature.properties.wdpa_name) {
-                                       html += `<strong>Protected Area:</strong> ${feature.properties.wdpa_name}<br/>`;
-                                   }
-                                   if (feature.properties.overlap_area) {
-                                       html += `<strong>Area:</strong> ${Math.round(feature.properties.overlap_area)} sq km`;
-                                   }
-                               }
-                               html += '</div>';
-                               layer.bindPopup(html);
-                           }
-                       }).addTo(overlapLayer);
-                       
-                       updateStatus("ISRA-WDPA overlap calculation complete!");
-                       
-                       // Add red circles around overlapping WDPAs
-                       updateStatus(`Adding red circles around ${overlappingWdpaIds.size} overlapping WDPAs...`);
-                       
-                       // Process each WDPA feature to highlight those that overlap with ISRAs
-                       wdpaFeatures.forEach(feature => {
-                           const featureId = feature.properties?.id || feature.id;
-                           
-                           // If this WDPA overlaps with ISRAs
-                           if (overlappingWdpaIds.has(featureId)) {
-                               try {
-                                   // Get the center of the WDPA polygon
-                                   const center = turf.center(feature);
-                                   const centerCoords = center.geometry.coordinates;
-                                   
-                                   // Calculate approximate radius based on feature size
-                                   let radius = 10000; // Default 10km
-                                   
-                                   try {
-                                       // Try to calculate a better radius based on the area
-                                       const area = turf.area(feature);
-                                       radius = Math.sqrt(area / Math.PI); // r = sqrt(A/π)
-                                       
-                                       // Add some buffer, but keep it reasonable
-                                       radius = Math.max(5000, Math.min(radius * 1.2, 50000));
-                                   } catch (e) {
-                                       console.error("Error calculating radius:", e);
-                                   }
-                                   
-                                   // Create a red circle
-                                   const circle = L.circle([centerCoords[1], centerCoords[0]], {
-                                       color: 'red',
-                                       fillColor: 'transparent',
-                                       fillOpacity: 0,
-                                       weight: 3,
-                                       radius: radius
-                                   });
-                                   
-                                   // Add popup with information
-                                   const name = getFeatureName(feature.properties);
-                                   circle.bindPopup(`<strong>Overlapping WDPA:</strong> ${name}`);
-                                   
-                                   // Add to the highlight layer
-                                   circle.addTo(highlightLayer);
-                               } catch (e) {
-                                   console.error("Error highlighting WDPA:", e);
-                               }
-                           }
-                       });
-                       
-                       updateStatus(`Added red circles to ${overlappingWdpaIds.size} overlapping WDPAs`);
-                       
-                       // Set up overlap area filter
-                       const minAreaSlider = document.getElementById('min-area');
-                       const areaValueDisplay = document.getElementById('area-value');
-                       const applyFilterBtn = document.getElementById('apply-filter');
-                       const resetFilterBtn = document.getElementById('reset-filter');
-                       
-                       // Update the display when slider changes
-                       minAreaSlider.addEventListener('input', function() {
-                           areaValueDisplay.textContent = this.value;
-                       });
-                       
-                       // Apply filter on button click
-                       applyFilterBtn.addEventListener('click', function() {
-                           const minArea = parseInt(minAreaSlider.value, 10);
-                           
-                           // Filter the features based on area
-                           const filteredFeatures = {
-                               type: "FeatureCollection",
-                               features: originalOverlapFeatures.features.filter(feature => 
-                                   feature.properties.overlap_area >= minArea
-                               )
-                           };
-                           
-                           // Update display with filtered features
-                           overlapLayer.clearLayers();
-                           filteredGeoJSONLayer = L.geoJSON(filteredFeatures, {
-                               style: {
-                                   color: 'purple',
-                                   fillColor: 'purple',
-                                   weight: 2,
-                                   opacity: 0.9,
-                                   fillOpacity: 0.7
-                               },
-                               onEachFeature: function(feature, layer) {
-                                   let html = '<div><strong>Overlap Area (ISRA + WDPA)</strong><br/>';
-                                   if (feature.properties) {
-                                       if (feature.properties.isra_name) {
-                                           html += `<strong>ISRA:</strong> ${feature.properties.isra_name}<br/>`;
-                                       }
-                                       if (feature.properties.wdpa_name) {
-                                           html += `<strong>Protected Area:</strong> ${feature.properties.wdpa_name}<br/>`;
-                                       }
-                                       if (feature.properties.overlap_area) {
-                                           html += `<strong>Area:</strong> ${Math.round(feature.properties.overlap_area)} sq km`;
-                                       }
-                                   }
-                                   html += '</div>';
-                                   layer.bindPopup(html);
-                               }
-                           }).addTo(overlapLayer);
-                           
-                           // Update stats for filtered overlaps
-                           updateOverlapStats(filteredFeatures);
-                       });
-                       
-                       // Reset filter on button click
-                       resetFilterBtn.addEventListener('click', function() {
-                           minAreaSlider.value = 0;
-                           areaValueDisplay.textContent = '0';
-                           
-                           // Restore original features
-                           overlapLayer.clearLayers();
-                           filteredGeoJSONLayer = L.geoJSON(originalOverlapFeatures, {
-                               style: {
-                                   color: 'purple',
-                                   fillColor: 'purple',
-                                   weight: 2,
-                                   opacity: 0.9,
-                                   fillOpacity: 0.7
-                               },
-                               onEachFeature: function(feature, layer) {
-                                   let html = '<div><strong>Overlap Area (ISRA + WDPA)</strong><br/>';
-                                   if (feature.properties) {
-                                       if (feature.properties.isra_name) {
-                                           html += `<strong>ISRA:</strong> ${feature.properties.isra_name}<br/>`;
-                                       }
-                                       if (feature.properties.wdpa_name) {
-                                           html += `<strong>Protected Area:</strong> ${feature.properties.wdpa_name}<br/>`;
-                                       }
-                                       if (feature.properties.overlap_area) {
-                                           html += `<strong>Area:</strong> ${Math.round(feature.properties.overlap_area)} sq km`;
-                                       }
-                                   }
-                                   html += '</div>';
-                                   layer.bindPopup(html);
-                               }
-                           }).addTo(overlapLayer);
-                           
-                           // Update stats for all overlaps
-                           updateOverlapStats(originalOverlapFeatures);
-                       });
-                       
-                   } else {
-                       updateStatus("Cannot calculate overlaps: Missing either ISRAs or WDPA data", true);
-                   }
-                   
-                   // Add layer controls with better organization
-                   const baseMaps = {
-                       "OpenStreetMap": osmLayer,
-                       "Satellite": satelliteLayer,
-                       "Topographic": topoLayer
-                   };
-                   
-                   const overlayMaps = {
-                       // Base layers
-                       "African Countries": countriesLayer,
-                       "Areas of Interest (AOI)": aoiLayer,
-                       "CISRA - Region 3": cisraLayer,
-                       
-                       // ISRA layers
-                       "ISRAs - Morocco": israelMoroccoLayer,
-                       "ISRAs - Tunisia": israelTunisiaLayer,
-                       "ISRAs - Libya": israelLibyaLayer,
-                       
-                       // WDPA layers
-                       "WDPA (Protected Areas)": wdpaLayer,
-                       "WDPA Points": wdpaPointsLayer,
-                       
-                       // Analysis layers
-                       "Overlap Areas (ISRAs + WDPA)": overlapLayer,
-                       "Overlapping WDPAs (Red Circles)": highlightLayer
-                   };
-                   
-                   L.control.layers(baseMaps, overlayMaps, {
-                       collapsed: false,
-                       position: 'topright'
-                   }).addTo(map);
-                   
-                   // Add zoom control to top-left corner
-                   L.control.zoom({
-                       position: 'topleft'
-                   }).addTo(map);
-                   
-                   // Add scale bar
-                   L.control.scale({
-                       imperial: false,
-                       metric: true,
-                       position: 'bottomleft'
-                   }).addTo(map);
-                   
-                   updateStatus("Map setup complete!");
-                   
-                   // Auto-hide status after 8 seconds
-                   setTimeout(() => {
-                       const status = document.getElementById('status');
-                       if (status) {
-                           status.style.display = 'none';
-                       }
-                   }, 8000);
-                   
-               } catch (error) {
-                   updateStatus(`General error loading data: ${error.message}`, true);
-                   console.error("Error loading data:", error);
-               }
-           }
-           
-           // Function to calculate overlaps between two GeoJSON datasets
-           function calculateOverlaps(dataset1, dataset2) {
-               const overlaps = {
-                   type: "FeatureCollection",
-                   features: []
-               };
-               
-               // Loop through each feature in dataset1
-               dataset1.features.forEach(feature1 => {
-                   // Loop through each feature in dataset2
-                   dataset2.features.forEach(feature2 => {
-                       try {
-                           // Calculate intersection using turf.js
-                           const intersection = turf.intersect(feature1, feature2);
-                           
-                           // If there is an overlap
-                           if (intersection) {
-                               // Calculate area in square kilometers
-                               const area = turf.area(intersection) / 1000000; // convert m² to km²
-                               
-                               // Add properties
-                               intersection.properties = {
-                                   isra_id: feature1.properties?.id || "Unknown ID",
-                                   isra_name: getFeatureName(feature1.properties),
-                                   wdpa_id: feature2.properties?.id || feature2.id || "Unknown ID",
-                                   wdpa_name: getFeatureName(feature2.properties),
-                                   overlap_area: area
-                               };
-                               
-                               // Add to overlaps collection
-                               overlaps.features.push(intersection);
-                           }
-                       } catch (error) {
-                           console.error("Error calculating intersection:", error);
-                       }
-                   });
-               });
-               
-               return overlaps;
-           }
-           
-           // Load data
-           loadData();
-       });
-   </script>
+                    });
+                    
+                    updateStatus(`Overlap calculation complete: ${calculatedCount} combinations checked, ${overlaps.features.length} overlaps found`);
+                    return overlaps;
+                }
+                
+                // Load data
+                loadData();
+                
+            } catch (error) {
+                updateStatus(`Fatal error initializing application: ${error.message}`, true);
+                console.error("Detailed error:", error);
+                // Set progress to complete to avoid a hanging progress bar
+                completedSteps = totalSteps;
+                updateProgressBar();
+            }
+        });
+    </script>
 </body>
 </html>
