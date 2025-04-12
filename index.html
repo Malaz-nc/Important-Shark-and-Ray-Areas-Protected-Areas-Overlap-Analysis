@@ -296,6 +296,14 @@
         
         // Enhanced fetch with retry, timeout, and error handling
         async function fetchWithRetry(url, retries = 3, timeout = 30000) {
+             // Try with different path formats
+             const pathVariations = [
+                url,                   // Original path
+                url.replace('./data/', 'data/'),  // Without leading ./
+                url.replace('./data/', '/data/'), // With absolute path
+                url.replace('./data/', '../data/') // With parent path
+            ];
+            
             for (let i = 0; i < retries; i++) {
                 const controller = new AbortController();
                 const timeoutId = setTimeout(() => controller.abort(), timeout);
